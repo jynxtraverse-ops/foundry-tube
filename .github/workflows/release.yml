@@ -1,0 +1,61 @@
+# Publishes a Foundry-installable release whenever a version tag (v1.2.3) is pushed.
+# The tag must match "version" in module.json, and "download" must point at that tag's module.zip.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v1.4.1.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Check module.json matches the tag
+        run: |
+          VERSION="$(jq -r .version module.json)"
+          DOWNLOAD="$(jq -r .download module.json)"
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match module.json version $VERSION"; exit 1
+          fi
+          case "$DOWNLOAD" in
+            *"/releases/download/$TAG/module.zip") ;;
+            *) echo "::error::module.json download ($DOWNLOAD) does not point at $TAG"; exit 1 ;;
+          esac
+
+      - name: Build module.zip
+        run: zip -r -X module.zip module.json scripts templates styles languages LICENSE README.md CHANGELOG.md
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          VERSION="${TAG#v}"
+          {
+            echo "**Manifest URL:** \`https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/module.json\`"
+            echo
+            awk -v head="## $VERSION " 'index($0, head) == 1 { found = 1; next } /^## / && found { exit } found' CHANGELOG.md
+          } > notes.md
+          cat notes.md
+
+      - name: Publish release
+        run: |
+          TITLE="Foundry Tube $TAG"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" module.json module.zip --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md
+          else
+            gh release create "$TAG" module.json module.zip --title "$TITLE" --notes-file notes.md --verify-tag
+          fi
