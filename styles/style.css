@@ -149,3 +149,4 @@ position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 20; bac
 #foundry-tube-app.custom-minimized { height: 58px !important; min-height: 58px !important; resize: horizontal !important; opacity: var(--minimized-opacity, 0.5); transition: opacity 0.5s ease-in-out 0.7s; }
 #foundry-tube-app.custom-minimized:hover { opacity: 1; transition-delay: 0s; }
 #foundry-tube-app.custom-minimized .video-container, #foundry-tube-app.custom-minimized #queue-overlay, #foundry-tube-app.custom-minimized #search-overlay { display: none !important; }
+.empty-msg.hint { color: #999; line-height: 1.6; padding: 0 16px; }
