@@ -1,10 +1,10 @@
 {
   "id": "foundry-tube",
   "title": "Foundry Tube",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "compatibility": {
     "minimum": "13",
-    "verified": "13"
+    "verified": "14"
   },
   "authors": [
     {
@@ -35,7 +35,7 @@
   "socket": true,
   "url": "https://github.com/jynxtraverse-ops/foundry-tube",
   "manifest": "https://github.com/jynxtraverse-ops/foundry-tube/releases/latest/download/module.json",
-  "download": "https://github.com/jynxtraverse-ops/foundry-tube/releases/download/v1.5.0/module.zip",
+  "download": "https://github.com/jynxtraverse-ops/foundry-tube/releases/download/v1.6.0/module.zip",
   "description": "A compact, synchronized YouTube player for Foundry VTT with a GM table mixer, playlists, search, and presets. Community-maintained fork of shrade's Foundry Tube.",
   "bugs": "https://github.com/jynxtraverse-ops/foundry-tube/issues",
   "changelog": "https://github.com/jynxtraverse-ops/foundry-tube/blob/main/CHANGELOG.md",

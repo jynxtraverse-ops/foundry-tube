@@ -325,7 +325,7 @@ class TubeMixer {
                     : (title ? `${title}. Double-click to name this channel.` : "Double-click to name this channel.");
             }
             const vol = row.querySelector('.mixer-vol');
-            if (document.activeElement !== vol) vol.value = tube.channelVolumes[tab];
+            if (vol.ownerDocument.activeElement !== vol) vol.value = tube.channelVolumes[tab];
             row.querySelector('[data-mixer="toggle"] i').className = playing ? "fas fa-pause" : "fas fa-play";
             row.querySelector('[data-mixer="next"]').title = tube.hasSkipRequest(tab) ? "Next track (approves the player's skip request)" : "Next track";
         });
@@ -359,6 +359,22 @@ class FoundryTubeMixerApp extends ApplicationV2 {
         const result = await super.close(options);
         if (!this.tube._mixerTransition) this.tube._onFloatingMixerClosed();
         return result;
+    }
+
+    /**
+     * Foundry v14 can pop this window out too. If that window was closed with the mixer inside,
+     * its buttons lost their listeners, so reopen a fresh copy.
+     */
+    _onAttach(from, to) {
+        super._onAttach?.(from, to);
+        const fromWin = from?.defaultView;
+        if (fromWin && !fromWin.closed) return;
+        setTimeout(async () => {
+            this.tube._mixerTransition = true;
+            try { await this.close({ animate: false }); } catch (e) {}
+            finally { this.tube._mixerTransition = false; }
+            this.render({ force: true });
+        }, 50);
     }
 }
 
@@ -404,6 +420,15 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         // GM: skip requests waiting for an answer, keyed by channel.
         this._skipRequests = {};
 
+        // Players move with the widget between Foundry's window and a popped-out one (v14+).
+        this._playerWin = Array(TAB_COUNT).fill(null);
+        this._pendingResume = Array(TAB_COUNT).fill(null);
+        this._initTimers = Array(TAB_COUNT).fill(null);
+        this._snap = Array(TAB_COUNT).fill(null);
+        this._windowTransition = false;
+        this._detachedWin = null;
+        this._rebuildingFromClose = false;
+
         this.mixer = new TubeMixer(this);
         this.mixerApp = null;
         this._dockWidthApplied = false;
@@ -432,13 +457,16 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             switchTab: FoundryTubeApp.prototype._onSwitchTab,
             manualSync: FoundryTubeApp.prototype._onManualSync,
             toggleMute: FoundryTubeApp.prototype._onToggleMute,
-            toggleMixer: FoundryTubeApp.prototype._onToggleMixer
+            toggleMixer: FoundryTubeApp.prototype._onToggleMixer,
+            togglePopout: FoundryTubeApp.prototype._onTogglePopout
         }
     };
 
     static PARTS = { main: { template: `modules/${MODULE_ID}/templates/widget.hbs` } };
 
     async minimize() {
+        // A popped-out window is sized by the OS; collapsing only makes sense inside Foundry.
+        if (this.isDetached() && !this.isCustomMinimized) return;
         this.isCustomMinimized = !this.isCustomMinimized;
         if (this.isCustomMinimized) {
             if (this.element) {
@@ -636,6 +664,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
             for (let i = 0; i < TAB_COUNT; i++) { this._updateTransportIcon(i); this._updateSkipButton(i); }
             this._updateChannelTooltips();
+            this._updatePopoutButtons();
+            this.element.classList.toggle('tube-detached', this.isDetached());
             if (game.user.isGM) this._layoutMixer();
         } catch (err) { console.error(err); }
     }
@@ -663,7 +693,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     _updatePlayerVolume(tab) {
         const p = this.players[tab];
-        if (p?.setVolume) p.setVolume(this._effectiveVolume(tab));
+        // A player whose window just closed throws; it is about to be rebuilt anyway.
+        try { if (p?.setVolume) p.setVolume(this._effectiveVolume(tab)); } catch (e) {}
     }
 
     _updateAllVolumes() { for (let i = 0; i < TAB_COUNT; i++) this._updatePlayerVolume(i); }
@@ -703,7 +734,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
     /** The saved mix changed (on any client): reload it and re-apply. */
     _onMixSettingChanged() {
         // The echo of an earlier save must not yank a slider the GM is still dragging.
-        if (document.activeElement?.classList?.contains('mixer-vol')) return;
+        const dragging = (doc) => doc?.activeElement?.classList?.contains('mixer-vol');
+        if (dragging(document) || dragging(this.element?.ownerDocument) || dragging(this.mixerApp?.element?.ownerDocument)) return;
         this._loadMix();
         this._updateAllVolumes();
         this._updateChannelTooltips();
@@ -914,6 +946,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (on === this._dockWidthApplied) return;
         this._dockWidthApplied = on;
         const delta = on ? DOCK_WIDTH : -DOCK_WIDTH;
+        if (this.isDetached()) { try { this._hostWindow().resizeBy(delta, 0); } catch (e) {} return; }
         if (this.isCustomMinimized) { this.savedWidth = Math.max(400, (this.savedWidth || 580) + delta); return; }
         const width = Math.max(400, (this.element?.offsetWidth || this.position.width || 580) + delta);
         this.savedWidth = width;
@@ -1245,7 +1278,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (isNaN(val)) return;
         this.masterVolume = val;
         this._updateAllVolumes();
-        this.element?.querySelectorAll('input[name="volume"]').forEach(i => { if (i !== document.activeElement) i.value = val; });
+        this.element?.querySelectorAll('input[name="volume"]').forEach(i => { if (i !== i.ownerDocument.activeElement) i.value = val; });
         this.isMuted = (val === 0);
         if (val > 0) this.preMuteVolume = val;
         this.element?.querySelectorAll('.volume-mute-btn i').forEach(icon => {
@@ -1929,34 +1962,92 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         setTimeout(() => this.playNext(tab, { fade: false }), 1500);
     }
 
-    _tryInitPlayer(tab) {
-        if (!window.YT?.Player) { setTimeout(() => this._tryInitPlayer(tab), 500); return; }
+    /* -------------------------------------------- */
+    /*  YouTube players (in whichever window holds the widget)  */
+    /* -------------------------------------------- */
+
+    /** The browser window currently holding the widget: Foundry's own, or a popped-out window. */
+    _hostWindow() { return this.element?.ownerDocument?.defaultView || window; }
+
+    isDetached() { return !!this.element && this.element.ownerDocument !== document; }
+
+    /** Load the YouTube IFrame API into a (popped-out) window that doesn't have it yet. */
+    _ensureYTApi(win) {
+        if (!win || win.closed || win.YT?.Player || win.document.getElementById('yt-api-script')) return;
+        const tag = win.document.createElement('script');
+        tag.id = 'yt-api-script';
+        tag.src = "https://www.youtube.com/iframe_api";
+        win.document.head.appendChild(tag);
+    }
+
+    /**
+     * True when the channel's player lives in the widget's current window and was built by that
+     * window's YouTube API. A player whose iframe was carried into another window stops talking
+     * to the API that created it, so it has to be rebuilt.
+     */
+    _playerIsHome(tab) {
+        const p = this.players[tab];
+        const doc = this.element?.ownerDocument;
+        let frame = null;
+        try { frame = p?.getIframe?.(); } catch (e) {}
+        return !!(p && frame?.isConnected && frame.ownerDocument === doc && this._playerWin[tab] === doc?.defaultView);
+    }
+
+    /**
+     * Create the channel's player in the widget's window. `resume` ({ videoId, time, playing })
+     * restarts it where it left off after the widget moved between windows.
+     */
+    _tryInitPlayer(tab, resume = null) {
+        if (resume) this._pendingResume[tab] = resume;
+        resume = this._pendingResume[tab] ?? null;
+        if (!resume && this._playerIsHome(tab)) return;
+        // While the widget is moving between windows, wait for the move to finish.
+        if (!resume && this._windowTransition) return;
+        const doc = this.element?.ownerDocument;
+        const win = doc?.defaultView;
+        if (!win || win.closed) return;
+        clearTimeout(this._initTimers[tab]);
+        if (!win.YT?.Player) {
+            this._ensureYTApi(win);
+            this._initTimers[tab] = setTimeout(() => this._tryInitPlayer(tab), 300);
+            return;
+        }
         const container = this.element.querySelector(`#foundry-tube-player-${tab}`);
         if (!container) return;
-        if (this.players[tab] && document.getElementById(`foundry-tube-iframe-${tab}`)) return;
-        const videoId = this.tabsState[tab].localVideoId || "";
+        this._pendingResume[tab] = null;
+        const old = this.players[tab];
+        if (old) { try { old.destroy(); } catch (e) {} }
+        const videoId = resume ? (resume.videoId || "") : (this.tabsState[tab].localVideoId || "");
         container.innerHTML = "";
-        const placeholder = document.createElement('div');
+        const placeholder = doc.createElement('div');
         placeholder.id = `foundry-tube-iframe-${tab}`;
         container.appendChild(placeholder);
-        this.players[tab] = new YT.Player(`foundry-tube-iframe-${tab}`, {
+        const playerVars = { 'playsinline': 1, 'controls': 0, 'rel': 0, 'modestbranding': 1, 'iv_load_policy': 3, 'origin': window.location.origin };
+        if (resume?.time > 1) playerVars.start = Math.floor(resume.time);
+        this._playerWin[tab] = win;
+        this.players[tab] = new win.YT.Player(placeholder, {
             height: '100%', width: '100%', videoId: videoId,
-            playerVars: { 'playsinline': 1, 'controls': 0, 'rel': 0, 'modestbranding': 1, 'iv_load_policy': 3, 'origin': window.location.origin },
+            playerVars,
             events: {
                 'onReady': (e) => {
                     e.target.setVolume(this._effectiveVolume(tab));
                     this._startProgressLoop(tab);
                     this._refreshTitle(tab, videoId);
-                    const autoplay = game.settings.get(MODULE_ID, 'autoplayStart');
-                    if (videoId && videoId.length > 0) {
-                        if (!this.initialLoad || autoplay) e.target.playVideo();
+                    if (resume) {
+                        // Carry on from where the channel was before the widget changed windows.
+                        if (videoId && resume.playing) { e.target.seekTo(resume.time, true); e.target.playVideo(); }
+                    } else {
+                        const autoplay = game.settings.get(MODULE_ID, 'autoplayStart');
+                        if (videoId && videoId.length > 0) {
+                            if (!this.initialLoad || autoplay) e.target.playVideo();
+                        }
                     }
                     if (!game.user.isGM) this.emitSocket("requestSync", { tabId: tab, requesterId: game.user.id });
                     const f = e.target.getIframe();
                     f.style.width="150%"; f.style.height="150%"; f.style.position="absolute"; f.style.top="50%"; f.style.left="50%"; f.style.transform="translate(-50%,-50%)"; f.style.border="none"; f.style.pointerEvents="none";
                 },
                 'onStateChange': (e) => {
-                    const isPlaying = e.data === YT.PlayerState.PLAYING;
+                    const isPlaying = e.data === 1;   // YT.PlayerState.PLAYING
                     this.element.querySelectorAll(`.channel-btn[data-target="${tab}"]`).forEach(b => {
                         if (isPlaying) b.classList.add('playing'); else b.classList.remove('playing');
                     });
@@ -1966,7 +2057,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
                             this._refreshTitle(tab, this.tabsState[tab].localVideoId);
                             this._healTrackMetadata(tab);
                         }
-                        if (game.user.isGM && e.data === YT.PlayerState.ENDED) {
+                        if (game.user.isGM && e.data === 0) {   // YT.PlayerState.ENDED
                             if (this.tabsState[tab].isLooping) { this.playVideo(tab, 0); this.emitSocket("play", { time: 0, tabId: tab }); }
                             else { this.playNext(tab, { fade: false }); }
                         }
@@ -1974,6 +2065,133 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
                 },
                 'onError': (e) => this._onPlayerError(tab, e.data)
             }
+        });
+    }
+
+    /** Remember where each channel is, so it can resume after the widget moves windows. */
+    _snapshot(tab) {
+        const p = this.players[tab];
+        if (!p?.getCurrentTime || !this._playerIsHome(tab)) return;
+        try {
+            this._snap[tab] = {
+                videoId: this.tabsState[tab].localVideoId || "",
+                time: p.getCurrentTime() || 0,
+                playing: p.getPlayerState() === 1 && !this._pendingPause[tab] && !this._personalPause[tab],
+                at: Date.now()
+            };
+        } catch (e) {}
+    }
+
+    _resumeFor(tab) {
+        const videoId = this.tabsState[tab].localVideoId || "";
+        const s = this._snap[tab];
+        if (!videoId || !s || s.videoId !== videoId) return { videoId, time: 0, playing: false };
+        return { videoId, time: s.playing ? s.time + (Date.now() - s.at) / 1000 : s.time, playing: s.playing };
+    }
+
+    /** Rebuild any channel whose player isn't in the widget's current window, resuming each one. */
+    _ensurePlayersInHost() {
+        for (let i = 0; i < TAB_COUNT; i++) {
+            if (this._playerIsHome(i)) continue;
+            const resume = this._resumeFor(i);
+            this._armFadeIn(i, resume.playing ? 800 : 0);
+            this._tryInitPlayer(i, resume);
+        }
+    }
+
+    /* -------------------------------------------- */
+    /*  Popping out (Foundry v14+)                  */
+    /* -------------------------------------------- */
+
+    canPopOut() { return typeof this.detachWindow === 'function' && typeof this.attachWindow === 'function'; }
+
+    async _onTogglePopout() {
+        if (!this.canPopOut()) return ui.notifications.warn("Popping the player out into its own window needs Foundry v14 or newer.");
+        for (let i = 0; i < TAB_COUNT; i++) this._snapshot(i);
+        if (this.isCustomMinimized) await this.minimize(); // pop out at full size
+        this._windowTransition = true;
+        const detaching = !this.isDetached();
+        try {
+            if (detaching) await this.detachWindow();
+            else { await this.attachWindow(); this._detachedWin = null; }
+        } catch (e) {
+            console.error(`${MODULE_ID} | pop-${detaching ? "out" : "in"} failed`, e);
+            ui.notifications.error(`Couldn't ${detaching ? "pop the player out" : "put the player back"}: ${plainText(e.message || e)}. If your browser blocked a pop-up, allow pop-ups for this site.`);
+        } finally {
+            this._windowTransition = false;
+        }
+        this._afterWindowMove();
+    }
+
+    /** Foundry v14: the widget was moved into a detached window. */
+    _onDetach(from, to) {
+        super._onDetach?.(from, to);
+        this._detachedWin = to?.defaultView || null;
+        this._ensureYTApi(to?.defaultView);
+        this._afterWindowMove();
+    }
+
+    /** Foundry v14: the widget was moved back into the main window. */
+    _onAttach(from, to) {
+        super._onAttach?.(from, to);
+        const fromWin = from?.defaultView;
+        if (!fromWin || fromWin.closed) return this._rebuildAfterClosedWindow();
+        this._detachedWin = null;
+        this._afterWindowMove();
+    }
+
+    _afterWindowMove() {
+        if (!this.element) return;
+        this.element.classList.toggle('tube-detached', this.isDetached());
+        if (!this._windowTransition) this._ensurePlayersInHost();
+        this._updatePopoutButtons();
+        this._refreshMixer();
+    }
+
+    /** The pop-out window was closed (e.g. with its own close button) while the widget was in it. */
+    _onDetachedWindowClosed(win) {
+        if (win && win === this._detachedWin) return this._rebuildAfterClosedWindow();
+        const doc = this.element?.ownerDocument;
+        if (!doc || doc === document) return;
+        const view = doc.defaultView;
+        if (!view || view.closed) this._rebuildAfterClosedWindow();
+    }
+
+    /**
+     * Browsers drop every event listener on elements that were inside a window when it closed,
+     * even after they're moved back, so the widget would come home unclickable. Instead, close it
+     * and build a fresh one in Foundry's window, resuming every channel where it was.
+     */
+    _rebuildAfterClosedWindow() {
+        if (this._rebuildingFromClose) return;
+        this._rebuildingFromClose = true;
+        this._detachedWin = null;
+        for (let i = 0; i < TAB_COUNT; i++) this._pendingResume[i] = this._resumeFor(i);
+        setTimeout(async () => {
+            try {
+                this._windowTransition = false;
+                try { await this.close({ force: true, animate: false }); }
+                catch (e) { console.warn(`${MODULE_ID} | closing the stranded widget failed`, e); }
+                this.players = Array(TAB_COUNT).fill(null);
+                this._playerWin = Array(TAB_COUNT).fill(null);
+                this._dockWidthApplied = false;
+                this.isCustomMinimized = false;
+                for (let i = 0; i < TAB_COUNT; i++) this._armFadeIn(i, this._pendingResume[i]?.playing ? 800 : 0);
+                await this.render({ force: true });
+            } finally {
+                this._rebuildingFromClose = false;
+            }
+        }, 50);
+    }
+
+    _updatePopoutButtons() {
+        const detached = this.isDetached();
+        this.element?.querySelectorAll('[data-action="togglePopout"]').forEach(btn => {
+            btn.style.display = this.canPopOut() ? '' : 'none';
+            btn.title = detached ? "Put the player back into Foundry" : "Pop the player out into its own window";
+            const icon = btn.querySelector('i');
+            if (icon) icon.className = detached ? "fas fa-right-to-bracket" : "fas fa-window-restore";
+            btn.classList.toggle('active', detached);
         });
     }
 
@@ -1990,7 +2208,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
                 const seek = this.element.querySelector(`.tube-instance[data-tab-index="${tab}"] .video-seeker`);
                 if(time) time.innerText = this._fmt(cur);
                 if(durl) durl.innerText = this._fmt(dur);
-                if(seek) { seek.max = dur; if(document.activeElement !== seek) seek.value = cur; }
+                if(seek) { seek.max = dur; if(seek.ownerDocument.activeElement !== seek) seek.value = cur; }
+                this._snapshot(tab);
             } catch(e) {}
         }, 1000);
     }
@@ -2170,6 +2389,9 @@ Hooks.once('ready', () => {
 
     game.socket.on(SOCKET_NAME, (p) => tubeApp._onSocket(p));
 });
+// Foundry v14: someone closed the window the widget was popped out into.
+Hooks.on('closeDetachedWindow', (id, win) => window.tubeApp?._onDetachedWindowClosed?.(win));
+
 Hooks.on('getSceneControlButtons', (controls) => {
     const toolConfig = {
         name: "tube-toggle",

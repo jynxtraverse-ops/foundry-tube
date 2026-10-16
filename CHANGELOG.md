@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.6.0 — 2026-10-16
+
+### Pop the player out into its own window (Foundry v14+)
+A new button in the widget, next to the playlist button, moves the whole player into a separate
+browser window, for the GM and for players. Put it on a second monitor, or keep it in view while
+Foundry is minimized. Press it again to put the player back.
+
+- Every channel carries on where it was: the YouTube players are rebuilt in the new window and
+  resume at the same spot with a short fade-in. Players also re-sync with the GM.
+- The docked mixer comes along with the player.
+- Closing the pop-out window with its own close button brings the player back into Foundry,
+  still playing.
+- Uses Foundry v14's built-in window pop-out support. On v13 the button is hidden.
+
+### Changes
+- Marked as verified for Foundry v14.
+
 ## 1.5.0 — 2026-10-16
 
 ### Table mixer (GM)

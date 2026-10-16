@@ -46,6 +46,8 @@ module folder, so they carry over. Updates then arrive through Foundry's normal 
     player is collapsed. Channel volumes are the GM's mix for the whole table, and channels can be
     given names like "Music", "Ambience" or "Combat".
 *   **Fades:** Pausing, resuming and skipping fade smoothly for everyone instead of cutting off.
+*   **Pop-out window (Foundry v14+):** Move the whole player into its own browser window, for
+    example on a second monitor. Music carries on without restarting.
 *   **Player controls:** Players can pause a channel just for themselves, and ask the GM to skip a
     track. The GM approves or keeps it.
 *   **Unplayable videos:** Videos whose owners block embedding are reported and skipped automatically.
@@ -70,12 +72,14 @@ module folder, so they carry over. Updates then arrive through Foundry's normal 
     *   The **pop-out** button turns the mixer into its own window; the **dock** button in that window puts it back.
     *   A docked mixer collapses along with the player. Use the pop-out window to keep the controls while the player is collapsed.
 7.  When a player asks to skip, a card appears with **Skip it** and **Keep playing**. Pressing Next yourself also approves it.
+8.  The **pop-out** button (next to the playlist button) moves the player into its own window on Foundry v14. Press it again, or close that window, to bring it back.
 
 ### For Players
 *   The video will play automatically when the GM starts it.
 *   You can adjust your own **Local Volume** using the slider on the right. It applies to every channel, on top of the GM's mix.
 *   **Pause** stops the channel for you only. **Play** rejoins the table wherever the music is now.
 *   **Skip** asks the GM to skip the current track.
+*   On Foundry v14, the **pop-out** button moves the player into its own window.
 *   The window can be moved or minimized locally.
 *   **Sync** re-syncs every channel with the GM.
 
