@@ -28,6 +28,10 @@ const PLAYER_ERRORS = {
     153: "YouTube rejected the request (no referrer information was sent)"
 };
 
+const DOCK_WIDTH = 270;                  // width the docked mixer adds to the main widget
+const SKIP_REQUEST_TIMEOUT_MS = 60000;   // unanswered skip requests expire after a minute
+const DEFAULT_MIX = () => ({ volumes: Array(TAB_COUNT).fill(100), names: Array(TAB_COUNT).fill("") });
+
 const endpointCooldowns = new Map();
 const endpointIsCooling = (name) => (endpointCooldowns.get(name) ?? 0) > Date.now();
 const coolEndpoint = (name) => endpointCooldowns.set(name, Date.now() + ENDPOINT_COOLDOWN_MS);
@@ -200,6 +204,165 @@ class YTProbe {
 }
 
 /* -------------------------------------------- */
+/*  Mixer (GM only)                             */
+/* -------------------------------------------- */
+
+/**
+ * One row per channel: name, table volume, previous / play-pause / next. A single instance is
+ * mounted either docked inside the main widget or inside its own floating window.
+ */
+class TubeMixer {
+    constructor(tube) { this.tube = tube; this.root = null; this.docked = true; }
+
+    mount(container, { docked }) {
+        this.docked = docked;
+        container.innerHTML = this._html();
+        this.root = container.querySelector('.tube-mixer');
+        this._bind();
+        this.refresh();
+    }
+
+    _html() {
+        const rows = Array.from({ length: TAB_COUNT }, (_, i) => `
+            <div class="mixer-row" data-tab="${i}">
+                <button type="button" class="mixer-chan" data-mixer="view" title="Channel ${i + 1}: click to view it, double-click to rename">${i + 1}</button>
+                <div class="mixer-label"></div>
+                <input type="range" class="mixer-vol" min="0" max="100" step="1" title="Channel ${i + 1} volume for the whole table">
+                <button type="button" class="mixer-btn" data-mixer="prev" title="Previous track"><i class="fas fa-backward-step"></i></button>
+                <button type="button" class="mixer-btn" data-mixer="toggle" title="Play / pause"><i class="fas fa-play"></i></button>
+                <button type="button" class="mixer-btn" data-mixer="next" title="Next track"><i class="fas fa-forward-step"></i></button>
+            </div>`).join("");
+        const dockButton = this.docked
+            ? `<button type="button" class="mixer-btn" data-mixer="detach" title="Pop the mixer out into its own window"><i class="fas fa-up-right-from-square"></i></button>`
+            : `<button type="button" class="mixer-btn" data-mixer="dock" title="Dock the mixer to the player"><i class="fas fa-table-columns"></i></button>`;
+        return `<div class="tube-mixer ${this.docked ? "docked" : "floating"}">
+            <div class="mixer-header"><span><i class="fas fa-sliders"></i> Table mix</span>${dockButton}</div>
+            <div class="mixer-rows">${rows}</div>
+        </div>`;
+    }
+
+    _bind() {
+        const root = this.root;
+        root.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-mixer]');
+            if (!el || !root.contains(el)) return;
+            const tab = el.closest('.mixer-row') ? Number(el.closest('.mixer-row').dataset.tab) : null;
+            switch (el.dataset.mixer) {
+                case 'view': this.tube.viewChannel(tab); break;
+                case 'prev': this.tube.playPrev(tab); break;
+                case 'toggle': this.tube.togglePlayback(tab); break;
+                case 'next': this.tube.playNext(tab); break;
+                case 'detach': this.tube.setMixerDocked(false); break;
+                case 'dock': this.tube.setMixerDocked(true); break;
+            }
+        });
+        root.addEventListener('dblclick', (e) => {
+            const el = e.target.closest('.mixer-chan, .mixer-label');
+            if (!el) return;
+            e.preventDefault(); e.stopPropagation();
+            this.beginRename(Number(el.closest('.mixer-row').dataset.tab));
+        });
+        root.querySelectorAll('.mixer-vol').forEach(input => {
+            const tab = Number(input.closest('.mixer-row').dataset.tab);
+            input.addEventListener('input', () => this.tube.setChannelVolume(tab, parseInt(input.value)));
+            input.addEventListener('change', () => this.tube.setChannelVolume(tab, parseInt(input.value), { persist: true }));
+        });
+    }
+
+    beginRename(tab) {
+        const row = this.root?.querySelector(`.mixer-row[data-tab="${tab}"]`);
+        if (!row || row.classList.contains('renaming')) return;
+        const label = row.querySelector('.mixer-label');
+        row.classList.add('renaming');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'mixer-rename';
+        input.maxLength = 40;
+        input.value = this.tube.channelNames[tab] || "";
+        input.placeholder = this.tube.currentTrackTitle(tab) || `Channel ${tab + 1}`;
+        label.replaceChildren(input);
+        input.focus();
+        input.select();
+        let finished = false;
+        const finish = (save) => {
+            if (finished) return;
+            finished = true;
+            row.classList.remove('renaming');
+            if (save) this.tube.setChannelName(tab, input.value.trim());
+            this.refresh();
+        };
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation(); // keep Foundry's hotkeys (Escape closes windows) away from the text box
+            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+        });
+        input.addEventListener('blur', () => finish(true));
+    }
+
+    refresh() {
+        if (!this.root?.isConnected) return;
+        const tube = this.tube;
+        this.root.querySelectorAll('.mixer-row').forEach(row => {
+            const tab = Number(row.dataset.tab);
+            const title = tube.currentTrackTitle(tab);
+            const name = tube.channelNames[tab];
+            const playing = tube.isChannelPlaying(tab);
+            // Docked, the channel on screen already shows its track in the player, so its row keeps quiet.
+            const viewed = this.docked && tab === tube.activeTab;
+            row.classList.toggle('viewed', viewed);
+            row.classList.toggle('playing', playing);
+            row.classList.toggle('empty', !title);
+            row.classList.toggle('skip-requested', tube.hasSkipRequest(tab));
+            row.querySelector('.mixer-chan').classList.toggle('active', tab === tube.activeTab);
+            if (!row.classList.contains('renaming')) {
+                const label = row.querySelector('.mixer-label');
+                const span = document.createElement('span');
+                span.className = 'mixer-label-text' + (name ? ' custom' : '') + (!name && !title ? ' muted' : '');
+                span.textContent = viewed ? "" : (name || title || "Empty");
+                label.replaceChildren(span);
+                label.title = name
+                    ? `${name}${title ? ` (now playing: ${title})` : ""}. Double-click to rename.`
+                    : (title ? `${title}. Double-click to name this channel.` : "Double-click to name this channel.");
+            }
+            const vol = row.querySelector('.mixer-vol');
+            if (document.activeElement !== vol) vol.value = tube.channelVolumes[tab];
+            row.querySelector('[data-mixer="toggle"] i').className = playing ? "fas fa-pause" : "fas fa-play";
+            row.querySelector('[data-mixer="next"]').title = tube.hasSkipRequest(tab) ? "Next track (approves the player's skip request)" : "Next track";
+        });
+    }
+}
+
+/** The mixer's own window, used when it is undocked. */
+class FoundryTubeMixerApp extends ApplicationV2 {
+    constructor(tube) {
+        super();
+        this.tube = tube;
+    }
+
+    static DEFAULT_OPTIONS = {
+        id: "foundry-tube-mixer", tag: "div", classes: ["foundry-tube-mixer-window"],
+        window: { title: "Tube Mixer", icon: "fas fa-sliders", resizable: false, minimizable: true },
+        position: { width: 340, height: "auto" }
+    };
+
+    async _renderHTML() { return null; }
+
+    _replaceHTML(result, content) { this.tube.mixer.mount(content, { docked: false }); }
+
+    _onPosition(position) {
+        super._onPosition?.(position);
+        clearTimeout(this._saveTimer);
+        this._saveTimer = setTimeout(() => this.tube._saveMixerState({ left: position.left, top: position.top }), 400);
+    }
+
+    async close(options = {}) {
+        const result = await super.close(options);
+        if (!this.tube._mixerTransition) this.tube._onFloatingMixerClosed();
+        return result;
+    }
+}
+
+/* -------------------------------------------- */
 /*  Application                                 */
 /* -------------------------------------------- */
 
@@ -224,6 +387,27 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         this._errorStreak = Array(TAB_COUNT).fill(0);
         this._warnedErrors = new Set();
         this._lastFetchReachedYouTube = true;
+
+        // Volume = this person's master volume × the GM's table mix for the channel × any fade in progress.
+        this.masterVolume = game.settings.get(MODULE_ID, 'clientVolume');
+        this._loadMix();
+        this._fadeLevel = Array(TAB_COUNT).fill(1);
+        this._fadeTokens = Array(TAB_COUNT).fill(0);
+        this._fadeInOnPlay = Array(TAB_COUNT).fill(0);
+        this._fadeTimers = Array(TAB_COUNT).fill(null);
+        this._pendingPause = Array(TAB_COUNT).fill(false);
+        this._mixEmit = Array(TAB_COUNT).fill(null).map(() => ({ timer: null, pending: false }));
+
+        // Players: channels they have paused for themselves, and their outstanding skip requests.
+        this._personalPause = Array(TAB_COUNT).fill(false);
+        this._mySkipRequests = {};
+        // GM: skip requests waiting for an answer, keyed by channel.
+        this._skipRequests = {};
+
+        this.mixer = new TubeMixer(this);
+        this.mixerApp = null;
+        this._dockWidthApplied = false;
+        this._mixerTransition = false;
     }
 
     static DEFAULT_OPTIONS = {
@@ -247,7 +431,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             importFromClipboard: FoundryTubeApp.prototype._onImportFromClipboard,
             switchTab: FoundryTubeApp.prototype._onSwitchTab,
             manualSync: FoundryTubeApp.prototype._onManualSync,
-            toggleMute: FoundryTubeApp.prototype._onToggleMute
+            toggleMute: FoundryTubeApp.prototype._onToggleMute,
+            toggleMixer: FoundryTubeApp.prototype._onToggleMixer
         }
     };
 
@@ -257,11 +442,13 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         this.isCustomMinimized = !this.isCustomMinimized;
         if (this.isCustomMinimized) {
             if (this.element) {
-                this.savedWidth = this.element.offsetWidth;
+                // offsetWidth is 0 while the widget is hidden; fall back to its known width.
+                this.savedWidth = this.element.offsetWidth || this.position.width || this.savedWidth;
                 if (this.element.offsetHeight > 100) this.savedHeight = this.element.offsetHeight;
             }
             this.element.classList.add('custom-minimized');
-            return this.setPosition({ height: 58, width: this.savedWidth });
+            // A docked mixer collapses with the widget, so the slim bar doesn't keep its width.
+            return this.setPosition({ height: 58, width: this._barWidth() });
         } else {
             this.element.classList.remove('custom-minimized');
             const w = this.savedWidth || 580;
@@ -305,6 +492,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             tabsData.push({
                 index: i, humanIndex: i + 1, isActive: (i === this.activeTab),
                           title: this.tabsState[i].playlist[this.tabsState[i].currentIndex]?.title || "No Video",
+                          channelTitle: this.channelNames[i] || `Channel ${i + 1}`,
                           volume: volume, isLooping: this.tabsState[i].isLooping, isShuffling: this.tabsState[i].isShuffling
             });
         }
@@ -324,7 +512,8 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             if (!this._resizeObserver) {
                 this._resizeObserver = new ResizeObserver((entries) => {
                     for (const entry of entries) {
-                        if (entry.contentRect.width > 50 && this.element.style.display !== 'none') {
+                        // While collapsed, the bar may be narrower than the full widget; keep the full width.
+                        if (entry.contentRect.width > 50 && this.element.style.display !== 'none' && !this.isCustomMinimized) {
                             this.savedWidth = entry.contentRect.width;
                             this.position.width = entry.contentRect.width;
 
@@ -408,16 +597,15 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
                         if (!controlsContainer.querySelector('[data-action="manualSync"]')) {
 
+                            // Players get play/pause (just for themselves) and skip (a request to the GM).
                             const prevBtn = container.querySelector('[data-action="playPrev"]');
                             const loopBtn = container.querySelector('[data-action="toggleLoop"]');
                             if (loopBtn) loopBtn.style.display = 'none';
                             const shuffleBtn = container.querySelector('[data-action="toggleShuffle"]');
                             if (shuffleBtn) shuffleBtn.style.display = 'none';
-                            const nextBtn = container.querySelector('[data-action="playNext"]');
-
                             if (prevBtn) prevBtn.style.display = 'none';
-                            if (playBtn) playBtn.style.display = 'none';
-                            if (nextBtn) nextBtn.style.display = 'none';
+                            const nextBtn = container.querySelector('[data-action="playNext"]');
+                            if (nextBtn) nextBtn.style.display = game.settings.get(MODULE_ID, 'allowSkipRequests') ? '' : 'none';
 
                             const syncBtn = document.createElement('button');
                             syncBtn.type = "button";
@@ -440,12 +628,470 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
             if (this.isCustomMinimized) {
                 this.element.classList.add('custom-minimized');
-                this.setPosition({ height: 58, width: this.savedWidth });
+                this.setPosition({ height: 58, width: this._barWidth() });
             }
             const enabled = game.settings.get(MODULE_ID, 'enableTransparency');
             const op = enabled ? game.settings.get(MODULE_ID, 'minimizedOpacity') / 100 : 1;
             this.element.style.setProperty('--minimized-opacity', op);
+
+            for (let i = 0; i < TAB_COUNT; i++) { this._updateTransportIcon(i); this._updateSkipButton(i); }
+            this._updateChannelTooltips();
+            if (game.user.isGM) this._layoutMixer();
         } catch (err) { console.error(err); }
+    }
+
+    /** Width of the collapsed bar: the widget minus a docked mixer, which collapses with it. */
+    _barWidth() {
+        const full = this.savedWidth || 580;
+        return this._dockWidthApplied ? Math.max(400, full - DOCK_WIDTH) : full;
+    }
+
+    /* -------------------------------------------- */
+    /*  Table mix & volume                          */
+    /* -------------------------------------------- */
+
+    _loadMix() {
+        const m = game.settings.get(MODULE_ID, 'channelMix') || {};
+        const d = DEFAULT_MIX();
+        this.channelVolumes = d.volumes.map((v, i) => Number.isFinite(m.volumes?.[i]) ? Math.min(100, Math.max(0, m.volumes[i])) : v);
+        this.channelNames = d.names.map((n, i) => (typeof m.names?.[i] === "string") ? m.names[i] : n);
+    }
+
+    _effectiveVolume(tab) {
+        return Math.round(this.masterVolume * (this.channelVolumes[tab] / 100) * this._fadeLevel[tab]);
+    }
+
+    _updatePlayerVolume(tab) {
+        const p = this.players[tab];
+        if (p?.setVolume) p.setVolume(this._effectiveVolume(tab));
+    }
+
+    _updateAllVolumes() { for (let i = 0; i < TAB_COUNT; i++) this._updatePlayerVolume(i); }
+
+    /** GM: set a channel's level in the table mix. Live while dragging; saved when released. */
+    setChannelVolume(tab, volume, { persist = false } = {}) {
+        if (!game.user.isGM || isNaN(volume)) return;
+        this.channelVolumes[tab] = Math.min(100, Math.max(0, volume));
+        this._updatePlayerVolume(tab);
+        this._emitMixVolume(tab);
+        if (persist) this._saveMix();
+    }
+
+    /** At most ~12 updates a second per channel while a slider is being dragged, plus the final value. */
+    _emitMixVolume(tab) {
+        const slot = this._mixEmit[tab];
+        if (slot.timer) { slot.pending = true; return; }
+        this.emitSocket("mixVolume", { tabId: tab, volume: this.channelVolumes[tab] });
+        slot.timer = setTimeout(() => {
+            slot.timer = null;
+            if (slot.pending) { slot.pending = false; this._emitMixVolume(tab); }
+        }, 80);
+    }
+
+    setChannelName(tab, name) {
+        if (!game.user.isGM) return;
+        this.channelNames[tab] = name || "";
+        this._saveMix();
+        this._updateChannelTooltips();
+        this._refreshMixer();
+    }
+
+    _saveMix() {
+        return game.settings.set(MODULE_ID, 'channelMix', { volumes: [...this.channelVolumes], names: [...this.channelNames] });
+    }
+
+    /** The saved mix changed (on any client): reload it and re-apply. */
+    _onMixSettingChanged() {
+        // The echo of an earlier save must not yank a slider the GM is still dragging.
+        if (document.activeElement?.classList?.contains('mixer-vol')) return;
+        this._loadMix();
+        this._updateAllVolumes();
+        this._updateChannelTooltips();
+        this._refreshMixer();
+    }
+
+    _updateChannelTooltips() {
+        this.element?.querySelectorAll('.channel-btn').forEach(btn => {
+            const i = parseInt(btn.dataset.target);
+            btn.title = this.channelNames[i] || `Channel ${i + 1}`;
+        });
+    }
+
+    /* -------------------------------------------- */
+    /*  Fades                                       */
+    /* -------------------------------------------- */
+
+    _fadeMs() { return Math.max(0, (game.settings.get(MODULE_ID, 'fadeSeconds') || 0) * 1000); }
+
+    /**
+     * Ramp a channel's fade level to `to` over `ms`. Resolves true when it finishes, or false if
+     * another fade or a new track took over the channel first.
+     */
+    _fade(tab, to, ms) {
+        const token = ++this._fadeTokens[tab];
+        const from = this._fadeLevel[tab];
+        if (!ms || from === to) {
+            this._fadeLevel[tab] = to;
+            this._updatePlayerVolume(tab);
+            return Promise.resolve(true);
+        }
+        const start = performance.now();
+        return new Promise(resolve => {
+            const step = () => {
+                if (token !== this._fadeTokens[tab]) return resolve(false);
+                const t = Math.min(1, (performance.now() - start) / ms);
+                this._fadeLevel[tab] = from + (to - from) * t;
+                this._updatePlayerVolume(tab);
+                if (t >= 1) return resolve(true);
+                setTimeout(step, 40);
+            };
+            step();
+        });
+    }
+
+    /** Stop any fade on the channel and set its level outright. */
+    _setFadeLevel(tab, level) {
+        this._fadeTokens[tab]++;
+        this._fadeLevel[tab] = level;
+        this._updatePlayerVolume(tab);
+    }
+
+    /** Start a fade-in the moment the next track actually starts playing (not while it buffers). */
+    _armFadeIn(tab, ms) {
+        clearTimeout(this._fadeTimers[tab]);
+        this._fadeInOnPlay[tab] = ms;
+        this._setFadeLevel(tab, ms ? 0 : 1);
+        if (!ms) return;
+        // Safety net: if the track never starts (error, blocked video), don't leave the channel silent.
+        this._fadeTimers[tab] = setTimeout(() => {
+            if (this._fadeInOnPlay[tab]) { this._fadeInOnPlay[tab] = 0; this._setFadeLevel(tab, 1); }
+        }, 8000);
+    }
+
+    /** Called from onStateChange when a channel starts playing. */
+    _maybeStartFadeIn(tab) {
+        const ms = this._fadeInOnPlay[tab];
+        if (!ms) return;
+        this._fadeInOnPlay[tab] = 0;
+        clearTimeout(this._fadeTimers[tab]);
+        this._fade(tab, 1, ms);
+    }
+
+    async _fadeOutAndPause(tab, ms) {
+        this._fadeInOnPlay[tab] = 0;
+        clearTimeout(this._fadeTimers[tab]);
+        this._pendingPause[tab] = true;
+        this._afterTransportChange(tab);
+        if (!(await this._fade(tab, 0, ms))) return false; // resumed mid-fade
+        this._pendingPause[tab] = false;
+        this.pauseVideo(tab);
+        this._setFadeLevel(tab, 1); // paused, so silent; full level is ready for the next play
+        this._afterTransportChange(tab);
+        return true;
+    }
+
+    _playWithFadeIn(tab, time, ms) {
+        const p = this.players[tab];
+        if (!p?.getPlayerState) return;
+        this._fadeInOnPlay[tab] = 0;
+        clearTimeout(this._fadeTimers[tab]);
+        this._pendingPause[tab] = false;
+        if (p.getPlayerState() !== 1) {
+            this._setFadeLevel(tab, ms ? 0 : 1);
+            this.playVideo(tab, time);
+        }
+        this._fade(tab, 1, ms);
+        this._afterTransportChange(tab);
+    }
+
+    /** GM: fade the current track out before switching tracks. False if superseded meanwhile. */
+    async _fadeOutForSwitch(tab, fade) {
+        const ms = fade ? this._fadeMs() : 0;
+        const p = this.players[tab];
+        if (!ms || p?.getPlayerState?.() !== 1 || this._pendingPause[tab]) { this._fadeTokens[tab]++; return true; }
+        this.emitSocket("fadeOut", { tabId: tab, fade: ms });
+        return this._fade(tab, 0, ms);
+    }
+
+    /** Player: the GM started a fade-out before a track change; restore the level if nothing follows. */
+    _remoteFadeOut(tab, ms) {
+        if (this._personalPause[tab]) return;
+        this._fade(tab, 0, ms);
+        clearTimeout(this._fadeTimers[tab]);
+        this._fadeTimers[tab] = setTimeout(() => {
+            if (this._fadeLevel[tab] < 1 && !this._fadeInOnPlay[tab] && !this._pendingPause[tab]) this._fade(tab, 1, 300);
+        }, ms + 5000);
+    }
+
+    isChannelPlaying(tab) {
+        return this.players[tab]?.getPlayerState?.() === 1 && !this._pendingPause[tab] && !this._personalPause[tab];
+    }
+
+    currentTrackTitle(tab) {
+        const st = this.tabsState[tab];
+        const current = st.playlist[st.currentIndex];
+        if (current && (!st.localVideoId || current.id === st.localVideoId)) return current.title;
+        if (st.localVideoId) {
+            const inList = st.playlist.find(v => v.id === st.localVideoId);
+            if (inList) return inList.title;
+            const data = this.players[tab]?.getVideoData?.();
+            if (data?.title) return data.title;
+        }
+        return current?.title || "";
+    }
+
+    /** Keep every view of a channel's transport (main widget button, mixer row) in step. */
+    _afterTransportChange(tab) {
+        this._updateTransportIcon(tab);
+        this._refreshMixer();
+    }
+
+    _updateTransportIcon(tab) {
+        const btn = this.element?.querySelector(`.tube-instance[data-tab-index="${tab}"] [data-action="togglePlayback"]`);
+        if (!btn) return;
+        const icon = btn.querySelector('i');
+        if (game.user.isGM) {
+            if (icon) icon.className = this.isChannelPlaying(tab) ? "fas fa-pause" : "fas fa-play";
+            return;
+        }
+        const playing = this.isChannelPlaying(tab);
+        if (icon) icon.className = playing ? "fas fa-pause" : "fas fa-play";
+        btn.title = this._personalPause[tab] ? "Resume (rejoins the table where the music is now)"
+            : (playing ? "Pause for me (the table keeps playing)" : "Play (catch up with the table)");
+    }
+
+    /* -------------------------------------------- */
+    /*  Mixer placement (GM)                        */
+    /* -------------------------------------------- */
+
+    _mixerState() {
+        return { visible: true, docked: true, left: null, top: null, ...(game.settings.get(MODULE_ID, 'mixerState') || {}) };
+    }
+
+    async _saveMixerState(patch) {
+        const state = { ...this._mixerState(), ...patch };
+        await game.settings.set(MODULE_ID, 'mixerState', state);
+        return state;
+    }
+
+    /** Put the mixer where its saved state says: docked in the widget, in its own window, or hidden. */
+    async _layoutMixer() {
+        if (!game.user.isGM || !this.element) return;
+        const state = this._mixerState();
+        const dock = this.element.querySelector('.tube-mixer-dock');
+        const wantDocked = state.visible && state.docked;
+        const wantFloating = state.visible && !state.docked;
+        this._mixerTransition = true;
+        try {
+            if (wantDocked && dock) {
+                if (this.mixerApp?.rendered) await this.mixerApp.close();
+                this.mixer.mount(dock, { docked: true });
+                dock.classList.add('active');
+            } else if (dock) {
+                dock.classList.remove('active');
+                dock.replaceChildren();
+            }
+            this._applyDockWidth(!!(wantDocked && dock));
+            if (wantFloating) {
+                this.mixerApp ??= new FoundryTubeMixerApp(this);
+                if (!this.mixerApp.rendered) {
+                    // Where it was left last time, or beside the player; always kept on screen.
+                    const rect = this.element.getBoundingClientRect();
+                    let left = Number.isFinite(state.left) ? state.left : Math.round(rect.right + 12);
+                    let top = Number.isFinite(state.top) ? state.top : Math.round(rect.top);
+                    left = Math.min(Math.max(0, left), Math.max(0, window.innerWidth - 340));
+                    top = Math.min(Math.max(0, top), Math.max(0, window.innerHeight - 120));
+                    await this.mixerApp.render({ force: true, position: { left, top } });
+                } else this.mixer.refresh();
+            } else if (this.mixerApp?.rendered) {
+                await this.mixerApp.close();
+            }
+        } finally { this._mixerTransition = false; }
+        this.element.querySelectorAll('[data-action="toggleMixer"]').forEach(b => b.classList.toggle('active', state.visible));
+    }
+
+    _applyDockWidth(on) {
+        if (on === this._dockWidthApplied) return;
+        this._dockWidthApplied = on;
+        const delta = on ? DOCK_WIDTH : -DOCK_WIDTH;
+        if (this.isCustomMinimized) { this.savedWidth = Math.max(400, (this.savedWidth || 580) + delta); return; }
+        const width = Math.max(400, (this.element?.offsetWidth || this.position.width || 580) + delta);
+        this.savedWidth = width;
+        this.setPosition({ width });
+    }
+
+    async setMixerDocked(docked) {
+        await this._saveMixerState({ docked, visible: true });
+        await this._layoutMixer();
+    }
+
+    async _onToggleMixer() {
+        if (!game.user.isGM) return;
+        await this._saveMixerState({ visible: !this._mixerState().visible });
+        await this._layoutMixer();
+    }
+
+    /** The floating mixer was closed with its own X (or Escape): remember it as hidden. */
+    async _onFloatingMixerClosed() {
+        await this._saveMixerState({ visible: false });
+        this.element?.querySelectorAll('[data-action="toggleMixer"]').forEach(b => b.classList.remove('active'));
+    }
+
+    _refreshMixer() { if (game.user.isGM) this.mixer?.refresh(); }
+
+    /** Show a channel in the main widget (the channel buttons and the mixer's channel numbers). */
+    viewChannel(idx) {
+        if (!Number.isInteger(idx)) return;
+        this.activeTab = idx;
+        this.element.querySelectorAll('.tube-instance').forEach(el => el.classList.remove('active'));
+        this.element.querySelector(`.tube-instance[data-tab-index="${idx}"]`)?.classList.add('active');
+        this.element.querySelectorAll('.channel-btn').forEach(btn => btn.classList.toggle('active', parseInt(btn.dataset.target) === idx));
+        const el = this.element.querySelector(`#track-title-text-${idx}`);
+        const span = el?.querySelector('span');
+        if (span) this.updateTrackTitle(idx, span.innerText);
+        this._refreshMixer();
+    }
+
+    /* -------------------------------------------- */
+    /*  Personal pause & skip requests (players)    */
+    /* -------------------------------------------- */
+
+    /** Pause or resume a channel for this player only. Resuming rejoins wherever the table is now. */
+    togglePersonalPause(tab) {
+        const p = this.players[tab];
+        if (this._personalPause[tab]) {
+            this._personalPause[tab] = false;
+            this._afterTransportChange(tab);
+            this.emitSocket("requestSync", { tabId: tab, requesterId: game.user.id, rejoin: true });
+            return;
+        }
+        if (p?.getPlayerState?.() === 1 && !this._pendingPause[tab]) {
+            this._personalPause[tab] = true;
+            this._fadeOutAndPause(tab, this._fadeMs());
+            this._afterTransportChange(tab);
+            return;
+        }
+        // Not playing here (e.g. joined with autoplay off): catch up with the table.
+        this.emitSocket("requestSync", { tabId: tab, requesterId: game.user.id, rejoin: true });
+    }
+
+    requestSkip(tab) {
+        if (!game.settings.get(MODULE_ID, 'allowSkipRequests')) return ui.notifications.warn("The GM has turned off skip requests.");
+        const st = this.tabsState[tab];
+        const videoId = st.localVideoId || st.playlist[st.currentIndex]?.id;
+        if (!videoId) return ui.notifications.info("Nothing is playing on this channel.");
+        if (this._mySkipRequests[tab]) return ui.notifications.info("You've already asked the GM to skip this track.");
+        if (!game.users.activeGM) return ui.notifications.warn("No GM is connected to approve a skip.");
+        this._mySkipRequests[tab] = {
+            videoId,
+            timer: setTimeout(() => this._onSkipResult({ tabId: tab, outcome: "expired" }), SKIP_REQUEST_TIMEOUT_MS + 3000)
+        };
+        this.emitSocket("skipRequest", { tabId: tab, videoId, requesterId: game.user.id });
+        this._updateSkipButton(tab);
+        ui.notifications.info(`Asked the GM to skip "${plainText(this.currentTrackTitle(tab) || "this track")}".`);
+    }
+
+    _onSkipResult(p) {
+        const tab = p.tabId;
+        const mine = this._mySkipRequests[tab];
+        if (!mine) return;
+        clearTimeout(mine.timer);
+        delete this._mySkipRequests[tab];
+        this._updateSkipButton(tab);
+        const messages = {
+            approved: "The GM approved your skip.",
+            denied: "The GM is keeping this track for the scene.",
+            changed: "The track changed before the GM answered.",
+            expired: "Your skip request wasn't answered."
+        };
+        const msg = messages[p.outcome];
+        if (msg) (p.outcome === "denied" ? ui.notifications.warn : ui.notifications.info).call(ui.notifications, msg);
+    }
+
+    _updateSkipButton(tab) {
+        if (game.user.isGM) return;
+        const btn = this.element?.querySelector(`.tube-instance[data-tab-index="${tab}"] [data-action="playNext"]`);
+        if (!btn) return;
+        const waiting = !!this._mySkipRequests[tab];
+        btn.classList.toggle('requested', waiting);
+        btn.title = waiting ? "Waiting for the GM to answer your skip request" : "Ask the GM to skip this track";
+    }
+
+    /* ---------- GM side ---------- */
+
+    hasSkipRequest(tab) { return !!this._skipRequests[tab]; }
+
+    _onSkipRequest(p) {
+        if (!this._isResponsibleGM()) return;
+        const tab = p.tabId;
+        const st = this.tabsState[tab];
+        const current = st.localVideoId || st.playlist[st.currentIndex]?.id;
+        if (!game.settings.get(MODULE_ID, 'allowSkipRequests')) return this._sendSkipResult(tab, [p.requesterId], "denied");
+        if (!current || p.videoId !== current) return this._sendSkipResult(tab, [p.requesterId], "changed");
+        let req = this._skipRequests[tab];
+        if (req && req.videoId !== current) { this._closeSkipRequest(tab); req = null; }
+        if (!req) {
+            req = this._skipRequests[tab] = { videoId: current, requesters: new Set(), toast: null };
+            req.timer = setTimeout(() => this._resolveSkipRequest(tab, "expired"), SKIP_REQUEST_TIMEOUT_MS);
+        }
+        req.requesters.add(p.requesterId);
+        this._renderSkipToast(tab);
+        this._refreshMixer();
+    }
+
+    async _resolveSkipRequest(tab, outcome) {
+        const req = this._skipRequests[tab];
+        if (!req) return;
+        this._closeSkipRequest(tab);
+        this._sendSkipResult(tab, [...req.requesters], outcome);
+        if (outcome === "approved") {
+            // At the end of a playlist there is nothing to skip to, so the channel fades out instead.
+            if (!(await this.playNext(tab)) && this.isChannelPlaying(tab)) this._pauseWithFade(tab);
+        }
+    }
+
+    _closeSkipRequest(tab) {
+        const req = this._skipRequests[tab];
+        if (!req) return;
+        clearTimeout(req.timer);
+        req.toast?.remove();
+        delete this._skipRequests[tab];
+        this._refreshMixer();
+    }
+
+    _sendSkipResult(tab, userIds, outcome) {
+        this.emitSocket("skipResult", { tabId: tab, outcome, targetUserIds: userIds });
+    }
+
+    /** A small card with Skip / Keep buttons; it never blocks the rest of the screen. */
+    _renderSkipToast(tab) {
+        const req = this._skipRequests[tab];
+        if (!req) return;
+        let host = document.getElementById('foundry-tube-requests');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'foundry-tube-requests';
+            document.body.appendChild(host);
+        }
+        if (!req.toast) {
+            req.toast = document.createElement('div');
+            req.toast.className = 'tube-request';
+            req.toast.dataset.tab = tab;
+            req.toast.addEventListener('click', (e) => {
+                const b = e.target.closest('[data-skip]');
+                if (b) this._resolveSkipRequest(tab, b.dataset.skip === "approve" ? "approved" : "denied");
+            });
+            host.appendChild(req.toast);
+        }
+        const names = [...req.requesters].map(id => game.users.get(id)?.name || "A player");
+        const who = names.length === 1 ? names[0] : (names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} players`);
+        const channel = this.channelNames[tab] || `Channel ${tab + 1}`;
+        const track = this.currentTrackTitle(tab) || "the current track";
+        req.toast.innerHTML =
+            `<div class="tube-request-text"><i class="fas fa-forward-step"></i> <b>${escapeHTML(who)}</b> ${names.length === 1 ? "wants" : "want"} to skip `
+            + `<span class="tube-request-track">${escapeHTML(track)}</span> <span class="tube-request-chan">on ${escapeHTML(channel)}</span></div>`
+            + `<div class="tube-request-actions"><button type="button" data-skip="approve"><i class="fas fa-check"></i> Skip it</button>`
+            + `<button type="button" data-skip="deny"><i class="fas fa-xmark"></i> Keep playing</button></div>`;
     }
 
     /* -------------------------------------------- */
@@ -461,23 +1107,40 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         this.updateTrackTitle(tab, videoData.title);
     }
 
-    async playNext(tab) {
-        if (!this.tryAdvanceTrackIndex(tab)) return;
-        await this._syncPlaylistState(tab);
-        const v = this.tabsState[tab].playlist[this.tabsState[tab].currentIndex];
-        if (!v) return;
-        this.broadcastState(tab, v.id, 0, true);
-        this.updateTrackTitle(tab, v.title);
+    /**
+     * Next track. GM: fades the current track out and the next one in (`fade: false` for automatic
+     * advances such as a track ending). Players: asks the GM to skip instead.
+     * Resolves true if the channel moved to another track.
+     */
+    async playNext(tab, { fade = true } = {}) {
+        if (!game.user.isGM) { this.requestSkip(tab); return false; }
+        // Pressing next while a player's skip request is waiting is the same as approving it.
+        if (this.hasSkipRequest(tab)) { await this._resolveSkipRequest(tab, "approved"); return true; }
+        if (!this.tryAdvanceTrackIndex(tab)) return false;
+        return this._switchToCurrent(tab, fade);
     }
 
-    async playPrev(tab) {
-        if (this.tabsState[tab].currentIndex <= 0) return;
+    async playPrev(tab, { fade = true } = {}) {
+        if (!game.user.isGM) return false;
+        if (this.tabsState[tab].currentIndex <= 0) return false;
         this.tabsState[tab].currentIndex--;
+        return this._switchToCurrent(tab, fade);
+    }
+
+    /** GM: play playlist entry `index` (e.g. clicked in the queue), with the usual fades. */
+    async _switchToIndex(tab, index, { fade = true } = {}) {
+        this.tabsState[tab].currentIndex = index;
+        return this._switchToCurrent(tab, fade);
+    }
+
+    async _switchToCurrent(tab, fade) {
+        if (!(await this._fadeOutForSwitch(tab, fade))) return false; // another switch took over
         await this._syncPlaylistState(tab);
         const v = this.tabsState[tab].playlist[this.tabsState[tab].currentIndex];
-        if (!v) return;
-        this.broadcastState(tab, v.id, 0, true);
+        if (!v) return false;
+        this.broadcastState(tab, v.id, 0, true, { fadeIn: fade });
         this.updateTrackTitle(tab, v.title);
+        return true;
     }
 
     tryAdvanceTrackIndex(tab) {
@@ -515,10 +1178,16 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         return bag.remaining.splice(pick, 1)[0];
     }
 
-    broadcastState(tab, videoId, time=0, isPlaying=true) {
+    broadcastState(tab, videoId, time=0, isPlaying=true, { fadeIn = false } = {}) {
+        const fadeMs = (fadeIn && isPlaying) ? this._fadeMs() : 0;
+        this._pendingPause[tab] = false;
+        this._armFadeIn(tab, fadeMs);
+        // Any outstanding skip request was about the previous track.
+        if (this._skipRequests[tab] && this._skipRequests[tab].videoId !== videoId) this._resolveSkipRequest(tab, "changed");
         this.loadVideo(tab, videoId);
         setTimeout(() => { if(this.players[tab]?.playVideo && isPlaying) this.players[tab].playVideo(); }, 800);
-        this.emitSocket(null, { action: "syncState", tabId: tab, videoId, time, isPlaying, isLooping: this.tabsState[tab].isLooping, isShuffling: this.tabsState[tab].isShuffling });
+        this.emitSocket(null, { action: "syncState", tabId: tab, videoId, time, isPlaying, fadeIn: fadeMs, isLooping: this.tabsState[tab].isLooping, isShuffling: this.tabsState[tab].isShuffling });
+        this._afterTransportChange(tab);
     }
 
     loadVideo(tab, videoId) {
@@ -548,16 +1217,34 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         setTimeout(() => { p.pauseVideo?.(); p.unMute?.(); }, 250);
     }
 
+    /** GM: pause/resume the channel for the whole table, with fades. Players: just for themselves. */
     togglePlayback(tab) {
+        if (!game.user.isGM) return this.togglePersonalPause(tab);
         const p = this.players[tab];
-        if(p && typeof p.getPlayerState === 'function') {
-            p.getPlayerState()===1 ? (this.pauseVideo(tab), this.emitSocket("pause", {tabId:tab})) : (this.playVideo(tab, p.getCurrentTime()), this.emitSocket("play", {time: p.getCurrentTime(), tabId:tab}));
-        }
+        if (!p || typeof p.getPlayerState !== 'function') return;
+        if (p.getPlayerState() === 1 && !this._pendingPause[tab]) return this._pauseWithFade(tab);
+        return this._resumeWithFade(tab);
     }
 
+    _pauseWithFade(tab) {
+        const ms = this._fadeMs();
+        this.emitSocket("pause", { tabId: tab, fade: ms });
+        return this._fadeOutAndPause(tab, ms);
+    }
+
+    _resumeWithFade(tab) {
+        const p = this.players[tab];
+        const ms = this._fadeMs();
+        const time = p.getCurrentTime();
+        this._playWithFadeIn(tab, time, ms);
+        this.emitSocket("play", { time, tabId: tab, fade: ms });
+    }
+
+    /** Set this person's own volume (all channels). The GM's table mix is applied on top. */
     _applyVolume(val, { save = false } = {}) {
         if (isNaN(val)) return;
-        this.players.forEach(p => { if (p?.setVolume) p.setVolume(val); });
+        this.masterVolume = val;
+        this._updateAllVolumes();
         this.element?.querySelectorAll('input[name="volume"]').forEach(i => { if (i !== document.activeElement) i.value = val; });
         this.isMuted = (val === 0);
         if (val > 0) this.preMuteVolume = val;
@@ -571,22 +1258,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
     /*  Actions                                     */
     /* -------------------------------------------- */
 
-    _onSwitchTab(event, target) {
-        const idx = parseInt(target.dataset.target);
-        this.activeTab = idx;
-        this.element.querySelectorAll('.tube-instance').forEach(el => el.classList.remove('active'));
-        this.element.querySelector(`.tube-instance[data-tab-index="${idx}"]`)?.classList.add('active');
-        this.element.querySelectorAll('.channel-btn').forEach(btn => {
-            const btnTarget = parseInt(btn.dataset.target);
-            if (btnTarget === idx) btn.classList.add('active');
-            else btn.classList.remove('active');
-        });
-            const el = this.element.querySelector(`#track-title-text-${idx}`);
-            if (el) {
-                const span = el.querySelector('span');
-                if (span) this.updateTrackTitle(idx, span.innerText);
-            }
-    }
+    _onSwitchTab(event, target) { this.viewChannel(parseInt(target.dataset.target)); }
 
     _onTogglePlayback() { this.togglePlayback(this.activeTab); }
     _onToggleLoop(e, t) { this.toggleLoop(this.activeTab, t); }
@@ -801,10 +1473,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
                             }
                             this._syncPlaylistState(tab);
                         } else {
-                            this.tabsState[tab].currentIndex = i;
-                            this._syncPlaylistState(tab);
-                            this.broadcastState(tab, v.id, 0, true);
-                            this.updateTrackTitle(tab, v.title);
+                            this._switchToIndex(tab, i);
                         }
                     });
                 } else { el.classList.add('readonly'); }
@@ -813,6 +1482,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             const activeEl = container.querySelector('.active-track');
             if(activeEl) activeEl.scrollIntoView({ block: "center", behavior: "smooth" });
         }
+        this._refreshMixer();
     }
 
     _listItemHTML(v) {
@@ -1194,6 +1864,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         } else {
             el.innerHTML = `<span>${safeText}</span>`;
         }
+        this._refreshMixer();
     }
 
     async _refreshTitle(tabId, videoId) {
@@ -1255,7 +1926,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             this._errorStreak[tab] = 0;
             return;
         }
-        setTimeout(() => this.playNext(tab), 1500);
+        setTimeout(() => this.playNext(tab, { fade: false }), 1500);
     }
 
     _tryInitPlayer(tab) {
@@ -1273,7 +1944,7 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             playerVars: { 'playsinline': 1, 'controls': 0, 'rel': 0, 'modestbranding': 1, 'iv_load_policy': 3, 'origin': window.location.origin },
             events: {
                 'onReady': (e) => {
-                    e.target.setVolume(game.settings.get(MODULE_ID, 'clientVolume'));
+                    e.target.setVolume(this._effectiveVolume(tab));
                     this._startProgressLoop(tab);
                     this._refreshTitle(tab, videoId);
                     const autoplay = game.settings.get(MODULE_ID, 'autoplayStart');
@@ -1286,20 +1957,20 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
                 },
                 'onStateChange': (e) => {
                     const isPlaying = e.data === YT.PlayerState.PLAYING;
-                    const btn = this.element.querySelector(`.tube-instance[data-tab-index="${tab}"] [data-action="togglePlayback"] i`);
-                    if (btn) btn.className = isPlaying ? "fas fa-pause" : "fas fa-play";
                     this.element.querySelectorAll(`.channel-btn[data-target="${tab}"]`).forEach(b => {
                         if (isPlaying) b.classList.add('playing'); else b.classList.remove('playing');
                     });
                         if (isPlaying) {
                             this._errorStreak[tab] = 0;
+                            this._maybeStartFadeIn(tab);
                             this._refreshTitle(tab, this.tabsState[tab].localVideoId);
                             this._healTrackMetadata(tab);
                         }
                         if (game.user.isGM && e.data === YT.PlayerState.ENDED) {
                             if (this.tabsState[tab].isLooping) { this.playVideo(tab, 0); this.emitSocket("play", { time: 0, tabId: tab }); }
-                            else { this.playNext(tab); }
+                            else { this.playNext(tab, { fade: false }); }
                         }
+                        this._afterTransportChange(tab);
                 },
                 'onError': (e) => this._onPlayerError(tab, e.data)
             }
@@ -1338,17 +2009,18 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
 
     /** Send one channel's full state to one user (or everyone, without a target). */
-    _sendTabState(i, targetUserId) {
+    _sendTabState(i, targetUserId, { fadeIn = 0 } = {}) {
         const st = this.tabsState[i];
         const saved = (game.settings.get(MODULE_ID, 'tabsState') || {})[i] || {};
         const player = this.players[i];
         const time = (player && typeof player.getCurrentTime === 'function') ? player.getCurrentTime() : 0;
-        const isPlaying = (player && typeof player.getPlayerState === 'function') ? (player.getPlayerState() === 1) : false;
+        // A channel that is fading out towards a pause counts as paused.
+        const isPlaying = (player && typeof player.getPlayerState === 'function') ? (player.getPlayerState() === 1 && !this._pendingPause[i]) : false;
         const base = { tabId: i, targetUserId };
         game.socket.emit(SOCKET_NAME, { action: "syncPlaylist", ...base, playlist: st.playlist, index: st.currentIndex });
         game.socket.emit(SOCKET_NAME, { action: "syncLoop", ...base, isLooping: st.isLooping });
         game.socket.emit(SOCKET_NAME, { action: "syncShuffle", ...base, isShuffling: st.isShuffling });
-        game.socket.emit(SOCKET_NAME, { action: "syncState", ...base, videoId: st.localVideoId || saved.videoId || "", time, isPlaying, isLooping: st.isLooping, isShuffling: st.isShuffling, sentAt: Date.now() });
+        game.socket.emit(SOCKET_NAME, { action: "syncState", ...base, videoId: st.localVideoId || saved.videoId || "", time, isPlaying, fadeIn, isLooping: st.isLooping, isShuffling: st.isShuffling, sentAt: Date.now() });
     }
 
     _onSocket(p) {
@@ -1356,7 +2028,18 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
         // Replies to one player's sync request are ignored by everyone else. Previously every
         // join triggered ~100 broadcast messages that made other players' music skip and blip.
         if (p.targetUserId && p.targetUserId !== game.user.id) return;
+        if (Array.isArray(p.targetUserIds) && !p.targetUserIds.includes(game.user.id)) return;
         const tab = Number.isInteger(p.tabId) ? p.tabId : 0;
+
+        if (p.action === "mixVolume") {
+            this.channelVolumes[tab] = Math.min(100, Math.max(0, Number(p.volume) || 0));
+            this._updatePlayerVolume(tab);
+            this._refreshMixer();
+            return;
+        }
+        if (p.action === "fadeOut") return this._remoteFadeOut(tab, p.fade);
+        if (p.action === "skipRequest") { if (game.user.isGM) this._onSkipRequest(p); return; }
+        if (p.action === "skipResult") return this._onSkipResult(p);
 
         if (p.action === "syncPlaylist") {
             this.tabsState[tab].playlist = p.playlist || [];
@@ -1376,16 +2059,21 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             if (btn) btn.classList.toggle('active', !!p.isShuffling); // was reading p.isLooping
         }
         else if (p.action === "syncState") {
+            clearTimeout(this._fadeTimers[tab]); // the follow-up to a fade-out has arrived
+            const personallyPaused = this._personalPause[tab];
             if (!p.videoId) {
                 // The GM's channel is empty: stop whatever this client still had loaded there.
                 if (this.tabsState[tab].localVideoId) { this.players[tab]?.stopVideo?.(); this.tabsState[tab].localVideoId = ""; }
+                if (!personallyPaused) { this._pendingPause[tab] = false; this._setFadeLevel(tab, 1); }
+                this._afterTransportChange(tab);
                 return;
             }
             const autoplay = game.settings.get(MODULE_ID, 'autoplayStart');
             const delay = this.initialLoad ? 1500 : 100;
             // On first load with "Auto play on Startup" off, the player gets the right track and
-            // position but waits for the Sync button.
-            const shouldPlay = p.isPlaying && !(this.initialLoad && !autoplay);
+            // position but waits for the Sync button. A channel the player paused for themselves
+            // stays paused until they resume it.
+            const shouldPlay = p.isPlaying && !personallyPaused && !(this.initialLoad && !autoplay);
             let seekTime = p.time || 0;
             if (p.isPlaying && this.initialLoad) {
                 // Clocks on different machines disagree, so never trust more than a few seconds of "lag".
@@ -1395,11 +2083,20 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
             const player = this.players[tab];
             const changed = p.videoId !== this.tabsState[tab].localVideoId;
+            const willStart = shouldPlay && (changed || player?.getPlayerState?.() !== 1);
+            if (!personallyPaused) {
+                this._pendingPause[tab] = false;
+                if (willStart && p.fadeIn) this._armFadeIn(tab, p.fadeIn);
+                else { this._fadeInOnPlay[tab] = 0; this._setFadeLevel(tab, 1); }
+            }
+
             if (!shouldPlay && changed && player?.cueVideoById) {
                 // Cue silently at the right spot. Loading and then pausing played a burst of sound.
                 this.tabsState[tab].localVideoId = p.videoId;
                 this._refreshTitle(tab, p.videoId);
                 player.cueVideoById({ videoId: p.videoId, startSeconds: seekTime });
+            } else if (!shouldPlay && personallyPaused) {
+                // Same track, still paused for this player: nothing to do until they resume.
             } else {
                 if (changed) this.loadVideo(tab, p.videoId);
                 if (shouldPlay) setTimeout(() => this.playVideo(tab, seekTime), delay);
@@ -1407,13 +2104,24 @@ class FoundryTubeApp extends HandlebarsApplicationMixin(ApplicationV2) {
             }
 
             if (this.initialLoad) setTimeout(() => { this.initialLoad = false; }, 2000);
+            this._afterTransportChange(tab);
         }
-        else if (p.action === "play") this.playVideo(tab, p.time);
-        else if (p.action === "pause") this.pauseVideo(tab);
+        else if (p.action === "play") {
+            if (this._personalPause[tab]) return;
+            clearTimeout(this._fadeTimers[tab]);
+            if (p.fade || this._pendingPause[tab]) this._playWithFadeIn(tab, p.time, p.fade || 0);
+            else this.playVideo(tab, p.time);
+        }
+        else if (p.action === "pause") {
+            clearTimeout(this._fadeTimers[tab]);
+            if (p.fade && this.players[tab]?.getPlayerState?.() === 1) this._fadeOutAndPause(tab, p.fade);
+            else { this.pauseVideo(tab); if (!this._personalPause[tab]) this._setFadeLevel(tab, 1); }
+        }
         else if (p.action === "requestSync" && game.user.isGM) {
             if (!this._isResponsibleGM()) return;
             const tabs = Number.isInteger(p.tabId) ? [p.tabId] : [...Array(TAB_COUNT).keys()];
-            for (const i of tabs) this._sendTabState(i, p.requesterId);
+            // A player resuming a channel they paused gets the same fade-in as everyone else.
+            for (const i of tabs) this._sendTabState(i, p.requesterId, { fadeIn: p.rejoin ? this._fadeMs() : 0 });
         }
     }
 }
@@ -1432,6 +2140,13 @@ Hooks.once('init', () => {
     game.settings.register(MODULE_ID, 'hideOnStartup', { name: "Hide on Startup", hint: "If enabled, the player widget will be hidden when you load the world.", scope: 'client', config: true, type: Boolean, default: true });
     game.settings.register(MODULE_ID, 'enableTransparency', { name: "Enable Transparency", hint: "If enabled, minimized player becomes transparent when not hovered.", scope: 'client', config: true, type: Boolean, default: true, onChange: () => { const app = window.tubeApp; if(app && app.element) { const op = game.settings.get(MODULE_ID, 'enableTransparency') ? game.settings.get(MODULE_ID, 'minimizedOpacity')/100 : 1; app.element.style.setProperty('--minimized-opacity', op); } } });
     game.settings.register(MODULE_ID, 'minimizedOpacity', { name: "Minimized Opacity (%)", hint: "Opacity of the player when minimized and not hovered (0-100).", scope: 'client', config: true, type: Number, default: 50, range: { min: 0, max: 100, step: 5 }, onChange: v => { const el = document.getElementById('foundry-tube-app'); if(el && game.settings.get(MODULE_ID, 'enableTransparency')) el.style.setProperty('--minimized-opacity', v / 100); } });
+    game.settings.register(MODULE_ID, 'channelMix', { scope: 'world', config: false, type: Object, default: DEFAULT_MIX(), onChange: () => window.tubeApp?._onMixSettingChanged?.() });
+    game.settings.register(MODULE_ID, 'mixerState', { scope: 'client', config: false, type: Object, default: { visible: true, docked: true, left: null, top: null } });
+    game.settings.register(MODULE_ID, 'fadeSeconds', { name: "Fade Length (seconds)", hint: "How long a channel fades out when it is paused or skipped, and fades back in when it resumes or starts the next track. 0 turns fades off.", scope: 'world', config: true, type: Number, default: 1.5, range: { min: 0, max: 5, step: 0.25 } });
+    game.settings.register(MODULE_ID, 'allowSkipRequests', { name: "Players Can Request Skips", hint: "Players get a skip button that asks the GM to skip the current track. The GM approves or keeps the track.", scope: 'world', config: true, type: Boolean, default: true, onChange: (allowed) => {
+        // Show or hide players' skip buttons in place (a re-render would restart every channel).
+        if (!game.user.isGM) window.tubeApp?.element?.querySelectorAll('[data-action="playNext"]').forEach(b => { b.style.display = allowed ? '' : 'none'; });
+    } });
     game.settings.register(MODULE_ID, 'skipUnplayable', { name: "Skip Unplayable Videos", hint: "When YouTube refuses to play a video (removed, private, or embedding disabled by its owner), automatically move on to the next track.", scope: 'world', config: true, type: Boolean, default: true });
     game.settings.register(MODULE_ID, 'youtubeApiKey', { name: "YouTube API Key (optional, GM)", hint: "Makes search and playlist import fast and reliable, with real titles and lengths. Free from Google Cloud Console: enable 'YouTube Data API v3' and create an API key. Stored only in this browser.", scope: 'client', config: true, restricted: true, type: String, default: "" });
     game.settings.register(MODULE_ID, 'customProxy', { name: "Custom CORS Proxy (optional, GM)", hint: "A CORS proxy to use for search when there is no API key. Put {url} where the YouTube address goes, e.g. https://my-proxy.example/?url={url}. Leave blank to skip.", scope: 'client', config: true, restricted: true, type: String, default: "" });

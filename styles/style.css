@@ -150,3 +150,50 @@ position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 20; bac
 #foundry-tube-app.custom-minimized:hover { opacity: 1; transition-delay: 0s; }
 #foundry-tube-app.custom-minimized .video-container, #foundry-tube-app.custom-minimized #queue-overlay, #foundry-tube-app.custom-minimized #search-overlay { display: none !important; }
 .empty-msg.hint { color: #999; line-height: 1.6; padding: 0 16px; }
+
+/* ---------- 1.5.0: layout with a dockable mixer ---------- */
+.foundry-tube-layout { display: flex; flex-direction: row; height: 100%; width: 100%; overflow: hidden; }
+.foundry-tube-layout > .foundry-tube-content { flex: 1 1 auto; width: auto; min-width: 0; }
+.tube-mixer-dock { display: none; flex: 0 0 270px; width: 270px; border-left: 1px solid #222; background: #0a0a0a; overflow: hidden; }
+.tube-mixer-dock.active { display: flex; }
+#foundry-tube-app.custom-minimized .tube-mixer-dock { display: none !important; }
+
+.tube-mixer { display: flex; flex-direction: column; width: 100%; color: #ccc; font-family: "Signika", sans-serif; }
+.tube-mixer .mixer-header { display: flex; align-items: center; justify-content: space-between; height: 28px; flex: 0 0 28px; padding: 0 6px 0 10px; font-size: 11px; color: #888; background: #0d0d0d; border-bottom: 1px solid #1f1f1f; }
+.tube-mixer .mixer-header i { margin-right: 4px; }
+.tube-mixer .mixer-rows { display: flex; flex-direction: column; }
+.tube-mixer .mixer-row { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 6px; border-bottom: 1px solid #161616; border-left: 2px solid transparent; }
+.tube-mixer .mixer-row.playing { border-left-color: #d64600; }
+.tube-mixer .mixer-row.viewed { background: rgba(255, 255, 255, 0.03); }
+.tube-mixer .mixer-chan { width: 16px; height: 16px; flex: 0 0 16px; padding: 0; margin: 0; background: #222; border: 1px solid #444; border-radius: 2px; color: #888; font-size: 9px; line-height: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.tube-mixer .mixer-chan:hover { color: #fff; background: #333; }
+.tube-mixer .mixer-chan.active { background: #666; border-color: #aaa; color: #fff; }
+.tube-mixer .mixer-row.playing .mixer-chan { border-color: #d64600; color: #ff8800; }
+.tube-mixer .mixer-label { flex: 1 1 auto; min-width: 0; font-size: 11px; cursor: text; }
+.tube-mixer .mixer-label-text { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #aaa; }
+.tube-mixer .mixer-label-text.custom { color: #f2f2f2; }
+.tube-mixer .mixer-label-text.muted { color: #555; font-style: italic; }
+.tube-mixer .mixer-rename { width: 100%; height: 20px; margin: 0; padding: 0 4px; background: #222; color: #fff; border: 1px solid #d64600; border-radius: 3px; font-size: 11px; }
+.tube-mixer .mixer-vol { flex: 0 0 64px; width: 64px; height: 3px; margin: 0 2px; accent-color: #888; cursor: pointer; }
+.tube-mixer .mixer-row:hover .mixer-vol { accent-color: #fff; }
+.tube-mixer .mixer-btn { width: 20px; height: 20px; flex: 0 0 20px; padding: 0; margin: 0; background: transparent; border: none; color: #777; font-size: 11px; line-height: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.tube-mixer .mixer-btn:hover { color: #fff; }
+.tube-mixer .mixer-row.playing [data-mixer="toggle"] { color: #d64600; }
+.tube-mixer .mixer-row.empty .mixer-btn { opacity: 0.35; }
+.tube-mixer .mixer-row.skip-requested [data-mixer="next"] { color: #ff8800; opacity: 1; animation: tube-pulse 1.2s ease-in-out infinite; }
+@keyframes tube-pulse { 50% { opacity: 0.35; } }
+
+#foundry-tube-mixer .window-content { padding: 0; background: #0a0a0a; overflow: hidden; }
+
+/* Players: skip button while a request is waiting for the GM */
+.icon-btn.requested { color: #ff8800; animation: tube-pulse 1.2s ease-in-out infinite; }
+
+/* GM: skip request cards */
+#foundry-tube-requests { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%); z-index: 9000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.tube-request { pointer-events: auto; min-width: 300px; max-width: 460px; padding: 8px 10px; background: #0d0d0d; color: #ddd; font-size: 12px; border: 1px solid #333; border-left: 3px solid #d64600; border-radius: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6); }
+.tube-request .tube-request-track { color: #fff; font-style: italic; }
+.tube-request .tube-request-chan { color: #888; }
+.tube-request .tube-request-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.tube-request .tube-request-actions button { width: auto; height: auto; margin: 0; padding: 2px 10px; line-height: 18px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 3px; font-size: 11px; cursor: pointer; }
+.tube-request .tube-request-actions button[data-skip="approve"]:hover { color: #fff; border-color: #d64600; }
+.tube-request .tube-request-actions button[data-skip="deny"]:hover { color: #fff; border-color: #888; }

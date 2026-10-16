@@ -1,3 +1,4 @@
+<div class="foundry-tube-layout">
 <div class="foundry-tube-content">
     <div class="tabs-content-wrapper">
         {{#each tabs}}
@@ -6,8 +7,8 @@
             <div class="control-bar">
                 <div class="playback-controls">
                     <button type="button" class="icon-btn" data-action="playPrev" title="Prev" {{#unless ../isGM}}disabled{{/unless}}><i class="fas fa-step-backward"></i></button>
-                    <button type="button" class="icon-btn" data-action="togglePlayback" title="Play/Pause" {{#unless ../isGM}}disabled{{/unless}}><i class="fas fa-play"></i></button>
-                    <button type="button" class="icon-btn" data-action="playNext" title="Next" {{#unless ../isGM}}disabled{{/unless}}><i class="fas fa-step-forward"></i></button>
+                    <button type="button" class="icon-btn" data-action="togglePlayback" title="Play/Pause"><i class="fas fa-play"></i></button>
+                    <button type="button" class="icon-btn" data-action="playNext" title="Next"><i class="fas fa-step-forward"></i></button>
                     <button type="button" class="icon-btn {{#if this.isLooping}}active{{/if}}" data-action="toggleLoop" title="Loop" {{#unless ../isGM}}disabled{{/unless}}><i class="fas fa-repeat"></i></button>
                     <button type="button" class="icon-btn {{#if this.isShuffling}}active{{/if}}" data-action="toggleShuffle" title="Shuffle" {{#unless ../isGM}}disabled{{/unless}}><i class="fas fa-shuffle"></i></button>
                 </div>
@@ -35,6 +36,7 @@
                     <div class="right-btns">
                         <button type="button" class="icon-btn" data-action="toggleQueue" title="Playlist"><i class="fas fa-list"></i></button>
                         {{#if ../isGM}}
+                        <button type="button" class="icon-btn" data-action="toggleMixer" title="Show or hide the mixer"><i class="fas fa-sliders"></i></button>
                         <button type="button" class="icon-btn toggle-mode-btn" data-action="toggleInputMode" title="Add/Search"><i class="fas fa-plus"></i></button>
                         {{/if}}
                     </div>
@@ -46,7 +48,7 @@
                         </div>
                         <div class="channel-switcher">
                             {{#each ../tabs}}
-                            <button type="button" class="channel-btn {{#if this.isActive}}active{{/if}}" data-action="switchTab" data-target="{{this.index}}">{{this.humanIndex}}</button>
+                            <button type="button" class="channel-btn {{#if this.isActive}}active{{/if}}" data-action="switchTab" data-target="{{this.index}}" title="{{this.channelTitle}}">{{this.humanIndex}}</button>
                             {{/each}}
                         </div>
                     </div>
@@ -98,4 +100,6 @@
         </div>
         {{/each}}
     </div>
+</div>
+<div class="tube-mixer-dock"></div>
 </div>

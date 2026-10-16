@@ -41,7 +41,18 @@ module folder, so they carry over. Updates then arrive through Foundry's normal 
     *   **Presets:** Save your current queue as a preset (e.g., "Battle Music", "Tavern Ambience") and load it later instantly.
 *   **Seamless Marquee:** Long video titles scroll automatically and seamlessly in the interface.
 *   **Loop and Shuffle:** Repeat the current track, or shuffle so every track plays once before any repeats.
+*   **Table Mixer (GM):** A row per channel with its name, volume and previous / play-pause / next.
+    Dock it beside the player or pop it out into its own window, so it stays available while the
+    player is collapsed. Channel volumes are the GM's mix for the whole table, and channels can be
+    given names like "Music", "Ambience" or "Combat".
+*   **Fades:** Pausing, resuming and skipping fade smoothly for everyone instead of cutting off.
+*   **Player controls:** Players can pause a channel just for themselves, and ask the GM to skip a
+    track. The GM approves or keeps it.
 *   **Unplayable videos:** Videos whose owners block embedding are reported and skipped automatically.
+
+![The mixer docked beside the player](docs/mixer-docked.png)
+
+![The player collapsed, with the mixer in its own window](docs/mixer-detached.png)
 
 ## Usage
 
@@ -53,10 +64,18 @@ module folder, so they carry over. Updates then arrive through Foundry's normal 
     *   **Drag** items to reorder.
     *   **Save** the current queue using the Save icon in the preset toolbar.
 5.  Double-click the very top edge (drag handle) to minimize/maximize the player.
+6.  The **sliders** button shows or hides the **mixer**:
+    *   Drag a channel's slider to set its level for the whole table.
+    *   Double-click a channel's name or number to rename it; clear the name to show the track title again.
+    *   The **pop-out** button turns the mixer into its own window; the **dock** button in that window puts it back.
+    *   A docked mixer collapses along with the player. Use the pop-out window to keep the controls while the player is collapsed.
+7.  When a player asks to skip, a card appears with **Skip it** and **Keep playing**. Pressing Next yourself also approves it.
 
 ### For Players
 *   The video will play automatically when the GM starts it.
-*   You can adjust your own **Local Volume** using the slider on the right. It applies to every channel.
+*   You can adjust your own **Local Volume** using the slider on the right. It applies to every channel, on top of the GM's mix.
+*   **Pause** stops the channel for you only. **Play** rejoins the table wherever the music is now.
+*   **Skip** asks the GM to skip the current track.
 *   The window can be moved or minimized locally.
 *   **Sync** re-syncs every channel with the GM.
 
@@ -70,6 +89,8 @@ Found under **Configure Settings → Foundry Tube**.
 | Custom CORS Proxy | GM, this browser only | Your own proxy for search without a key. Use `{url}` as the placeholder. |
 | Try Free Public Proxies | GM, this browser only | On by default. Turn off to never route requests through third-party proxies. |
 | Skip Unplayable Videos | World | Auto-skip videos YouTube refuses to embed. On by default. |
+| Fade Length (seconds) | World | How long pauses, resumes and skips fade. 0 turns fades off. Default 1.5. |
+| Players Can Request Skips | World | Gives players a skip button that asks the GM. On by default. |
 | Auto play on Startup | Each user | Start playing as soon as you log in. Otherwise press **Sync**. |
 | Hide on Startup | Each user | Start with the widget hidden. |
 
